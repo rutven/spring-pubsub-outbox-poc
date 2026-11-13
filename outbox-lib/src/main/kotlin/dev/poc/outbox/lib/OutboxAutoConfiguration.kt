@@ -1,6 +1,15 @@
 package dev.poc.outbox.lib
 
 import com.google.cloud.spring.pubsub.core.publisher.PubSubPublisherTemplate
+import com.google.cloud.spring.pubsub.core.subscriber.PubSubSubscriberTemplate
+import dev.poc.outbox.lib.inbox.InboxProcessor
+import dev.poc.outbox.lib.inbox.InboxRepository
+import dev.poc.outbox.lib.outbox.OutboxMetrics
+import dev.poc.outbox.lib.outbox.OutboxPurgeJob
+import dev.poc.outbox.lib.subscribe.EventHandler
+import dev.poc.outbox.lib.subscribe.PubSubEventSubscriber
+import io.micrometer.observation.ObservationRegistry
+import org.springframework.jdbc.core.JdbcTemplate
 import com.google.cloud.spring.pubsub.support.PublisherFactory
 import dev.poc.outbox.lib.outbox.CrashAction
 import dev.poc.outbox.lib.outbox.OutboxProperties
@@ -62,4 +71,23 @@ class OutboxAutoConfiguration {
     @Bean
     @ConditionalOnProperty("poc.outbox.relay-enabled", matchIfMissing = true)
     fun outboxRelayScheduler(relay: OutboxRelay) = OutboxRelayScheduler(relay)
+
+    @Bean
+    fun outboxPurgeJob(jdbc: JdbcTemplate, properties: OutboxProperties) = OutboxPurgeJob(jdbc, properties)
+
+    @Bean
+    fun outboxMetrics(jdbc: JdbcTemplate, meterRegistry: MeterRegistry) = OutboxMetrics(jdbc, meterRegistry)
+
+    @Bean
+    fun inboxProcessor(inbox: InboxRepository) = InboxProcessor(inbox)
+
+    @Bean
+    fun pubSubEventSubscriber(
+        template: PubSubSubscriberTemplate,
+        handlers: List<EventHandler>,
+        inboxProcessor: InboxProcessor,
+        observations: ObservationRegistry,
+        meterRegistry: MeterRegistry,
+        @Value("\${poc.chaos.consumer-fail-rate:0.0}") consumerFailRate: Double,
+    ) = PubSubEventSubscriber(template, handlers, inboxProcessor, observations, meterRegistry, consumerFailRate)
 }
