@@ -70,14 +70,16 @@ Table `outbox` sits in each service schema. Columns:
 | `attempts` | int |
 | `next_attempt_at` | timestamptz null |
 | `last_error` | text null |
+| `failed_at` | timestamptz null |
 
 `topic` was added beyond the grilling list because the relay needs it.
 
 Relay (`@Scheduled` fixed delay 500 ms, batch 100):
 - One transaction claims rows with `FOR UPDATE SKIP LOCKED`, publishes them, waits for the futures and sets `published_at`.
 - Per-key ordering when several instances run: the claim takes `pg_try_advisory_xact_lock(hashtext(aggregate_id))`. Only one instance can own a key in a transaction.
-- A row is not claimed while an earlier unpublished row of the same key is in backoff.
-- If a publish fails, `attempts` goes up, `next_attempt_at = now + min(2^attempts s, 60 s)` and `last_error` is set. Later rows of the same key in the batch are skipped, and `resumePublish(key)` runs on the next cycle. Retries never stop; there is no outbox-side dead letter.
+- A row is not claimed while an earlier unpublished row of the same key is in backoff or failed.
+- If a publish fails, `attempts` goes up, `next_attempt_at = now + min(2^attempts s, 60 s)` and `last_error` is set. Later rows of the same key in the batch are skipped, and `resumePublish(key)` runs on the next cycle.
+- After 10 attempts the row gets `failed_at` and an ERROR log, and it is not retried on its own. Its key stays blocked, to keep ordering, until a manual SQL requeue (`failed_at=null, attempts=0, next_attempt_at=null`). Agreed 2026-11-13.
 - Published rows are purged after 7 days by an hourly job. Inbox rows are purged after 14 days.
 
 ## Inbox / consumer
@@ -94,6 +96,9 @@ Relay (`@Scheduled` fixed delay 500 ms, batch 100):
   - `outbox.lag` (gauge, seconds since the oldest unpublished `created_at`)
   - `outbox.published` (counter)
   - `outbox.publish.failures` (counter)
+  - `outbox.failed` (gauge, rows with `failed_at` set)
+  - `outbox.blocked` (gauge, unpublished rows behind a failed or backing-off row of the same key)
+- GCP alert policy: `outbox_failed > 0`, notifying by email.
 - On GCP, the apps export OTLP to `localhost:4318`. A Google-built OpenTelemetry Collector sidecar (`otelcol-google`) in each Cloud Run service forwards traces to Cloud Trace and metrics to Cloud Monitoring. Logs go to stdout and Cloud Logging.
 
 ## Failure demos (config flags)

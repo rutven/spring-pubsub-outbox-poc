@@ -30,7 +30,7 @@
 - Subscriptions: `payment-service.order-events`, `order-service.payment-events`. Both have ordering on, `maxDeliveryAttempts=5` and retry 10s–600s.
 - Schemas and users: `orders`/`order_svc`, `payments`/`payment_svc`. Password = user name, local only.
 - Ports: order 8081, payment 8082, Postgres 5432, emulator 8085, Grafana 3000, OTLP 4317/4318.
-- Relay: fixed delay `500ms`, batch `100`, backoff `min(2^attempts, 60)` seconds. Purge published outbox rows older than `7d` and inbox rows older than `14d`.
+- Relay: fixed delay `500ms`, batch `100`, backoff `min(2^attempts, 60)` seconds, `maxAttempts=10`. After the last attempt the relay sets `failed_at` and never retries the row on its own. The key stays blocked until someone requeues the row by hand. Purge published outbox rows older than `7d` and inbox rows older than `14d`.
 - Payment rule: `amount > 1000` → declined (reason `"amount exceeds limit"`).
 - Commit messages: extremely concise, end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
@@ -41,6 +41,7 @@
 3. **Duplicate delivery after crash-after-publish.** The business effect must happen exactly once and the duplicate must be acked. Test: `crash after publish leads to redelivery deduplicated by inbox` (Task 7).
 4. **Malformed or unknown `eventType` arrives.** It must be acked and ignored (logged), not nacked forever. A bad JSON payload must be nacked so it reaches the DLQ. Test: `unknown event type is acked and ignored` and `malformed payload is nacked` (Task 4).
 5. **Payment event arrives for an order already CANCELLED by the user.** Status must stay CANCELLED with no exception, and the message must be acked. Test: `payment completed for cancelled order keeps cancelled` (Task 5).
+6. **Event that can never be published (poison).** After 10 attempts it is marked failed, its key stays blocked and other keys keep flowing. This is visible as `outbox.failed`/`outbox.blocked` and an ERROR log. A manual requeue unblocks it. Tests: `row exceeding max attempts is marked failed and blocks its key` and `requeued failed row is published` (Task 3), plus the `OutboxMetricsTest` blocked/failed counts (Task 4).
 
 The emulator may not apply dead-letter policies. DLQ behaviour is checked only on GCP (Task 10).
 
@@ -83,7 +84,7 @@ The emulator may not apply dead-letter policies. DLQ behaviour is checked only o
 
 **Interfaces:**
 - Produces:
-  - `@Entity OutboxEvent(id: Long?, eventId: UUID, topic: String, aggregateType: String, aggregateId: String, eventType: String, payload: String /* jsonb via @JdbcTypeCode(SqlTypes.JSON) */, headers: Map<String,String>, createdAt: Instant, publishedAt: Instant?, attempts: Int, nextAttemptAt: Instant?, lastError: String?)`
+  - `@Entity OutboxEvent(id: Long?, eventId: UUID, topic: String, aggregateType: String, aggregateId: String, eventType: String, payload: String /* jsonb via @JdbcTypeCode(SqlTypes.JSON) */, headers: Map<String,String>, createdAt: Instant, publishedAt: Instant?, attempts: Int, nextAttemptAt: Instant?, lastError: String?, failedAt: Instant?)` (the changelog adds a `failed_at timestamptz null` column)
   - `class OutboxWriter { @Transactional(propagation = MANDATORY) fun append(topic: String, aggregateType: String, aggregateId: String, eventType: String, payload: Any): OutboxEvent }`. It serializes `payload` with the injected Jackson `JsonMapper`. It puts `traceparent` into `headers` through Micrometer `Propagator.inject` on `tracer.currentTraceContext().context()` and skips it when there is no current span.
   - `interface OutboxRepository : JpaRepository<OutboxEvent, Long>` (relay queries added in Task 3)
 
@@ -114,18 +115,19 @@ The emulator may not apply dead-letter policies. DLQ behaviour is checked only o
   - `interface MessagePublisher { fun publish(message: OutboundMessage): CompletableFuture<String>; fun resume(topic: String, orderingKey: String) }`
   - `PubSubMessagePublisher(PubSubPublisherTemplate, PublisherFactory)`. Ordering key comes from the `GcpPubSubHeaders.ORDERING_KEY` header. `resume` calls `publisherFactory.createPublisher(topic).resumePublish(key)`.
   - Attributes: `eventId`, `eventType`, `aggregateId`, `occurredAt` (ISO-8601) and every entry of `headers`.
-  - `@ConfigurationProperties("poc.outbox") data class OutboxProperties(val batchSize: Int = 100, val pollDelay: Duration = 500ms, val maxBackoff: Duration = 60s, val outboxRetention: Duration = 7d, val inboxRetention: Duration = 14d, val relayEnabled: Boolean = true)`
+  - `@ConfigurationProperties("poc.outbox") data class OutboxProperties(val batchSize: Int = 100, val pollDelay: Duration = 500ms, val maxBackoff: Duration = 60s, val maxAttempts: Int = 10, val outboxRetention: Duration = 7d, val inboxRetention: Duration = 14d, val relayEnabled: Boolean = true)`
   - `class OutboxRelay { fun relayOnce(): RelayResult }` and `data class RelayResult(val published: Int, val failed: Int, val skipped: Int)`
   - `fun interface CrashAction { fun crash() }`. The default bean calls `Runtime.getRuntime().halt(1)`. It is called after all futures finish and before commit when `poc.chaos.crash-after-publish=true`.
-- Claim query (native, inside the relay transaction). The advisory lock serializes keys across instances, and `NOT EXISTS` blocks a key while its head row is in backoff:
+- Claim query (native, inside the relay transaction). The advisory lock serializes keys across instances, and `NOT EXISTS` blocks a key while its head row is in backoff or failed:
 
 ```sql
 select o.* from outbox o
-where o.published_at is null
+where o.published_at is null and o.failed_at is null
   and (o.next_attempt_at is null or o.next_attempt_at <= now())
   and not exists (select 1 from outbox p
                   where p.aggregate_id = o.aggregate_id and p.published_at is null
-                    and p.id < o.id and p.next_attempt_at > now())
+                    and p.id < o.id
+                    and (p.failed_at is not null or p.next_attempt_at > now()))
   and pg_try_advisory_xact_lock(hashtext(o.aggregate_id))
 order by o.id
 limit :limit
@@ -138,7 +140,7 @@ for update skip locked
   3. Publish in id order. After a failure on key K, skip the remaining rows of K (counted as `skipped`).
   4. Wait for all futures.
   5. Mark the successes with `published_at = now()`.
-  6. Mark the failures with `attempts+1`, `next_attempt_at = now + min(2^attempts s, maxBackoff)` and `last_error`.
+  6. Mark the failures with `attempts+1`, `next_attempt_at = now + min(2^attempts s, maxBackoff)` and `last_error`. When `attempts` reaches `maxAttempts`, set `failed_at = now()` instead and log at ERROR with `eventId`, `aggregateId`, `topic` and `last_error`.
   7. Run the chaos crash check.
   8. Commit.
 - `OutboxRelayScheduler`: `@Scheduled(fixedDelayString = "\${poc.outbox.poll-delay:500ms}")`. It is active only when `relay-enabled`.
@@ -151,6 +153,8 @@ for update skip locked
   - `resume is called for previously failed key`: assert `RecordingPublisher.resumed` contains (topic, K1).
   - `crash after publish rolls back marking`: test `CrashAction` throws, then assert the exception, the row still unpublished and the message recorded once.
   - `attributes contain envelope and traceparent`.
+  - `row exceeding max attempts is marked failed and blocks its key`: `maxAttempts=2`, always failing K1 head, rows K1 a, b and K2 c. Relay until a has 2 attempts (move `next_attempt_at` into the past between cycles). Assert a has `failed_at` set, b is never recorded and c is recorded.
+  - `requeued failed row is published`: after the previous test, run the requeue SQL (`failed_at=null, attempts=0, next_attempt_at=null`) and stop the publisher failing. Assert that a and then b are recorded in order.
 - [ ] **Step 2: Write `OutboxRelayConcurrencyTest`.** 20 keys × 10 rows. Run two `relayOnce()` loops on 2 threads until nothing is pending. Assert each eventId is recorded exactly once and that the recorded ids are strictly increasing per key.
 - [ ] **Step 3: Write `PubSubMessagePublisherTest`** against the emulator. Publish 3 messages with the same key, pull them from `payment-service.order-events`, then assert the order, the attributes and that the ordering key is set.
 - [ ] **Step 4: Run** `./gradlew :outbox-lib:test`. Expected: the new tests FAIL.
@@ -180,7 +184,12 @@ for update skip locked
     4. Any exception → log, nack.
     5. Handlers throw `MalformedEventException` on JSON parse errors. It is nacked like any other exception.
   - `OutboxPurgeJob.purge(): Pair<Int, Int>` (deleted outbox, deleted inbox) on an `@Scheduled(cron = "0 0 * * * *")`.
-  - `OutboxMetrics`: Micrometer gauges `outbox.pending` and `outbox.lag` (seconds, 0 when empty), and counters `outbox.published` and `outbox.publish.failures`, which the relay increments.
+  - `OutboxMetrics`: Micrometer gauges and counters:
+    - `outbox.pending` and `outbox.lag` (seconds, 0 when empty)
+    - `outbox.failed`: rows with `failed_at` set and `published_at` null
+    - `outbox.blocked`: unpublished rows with an earlier unpublished row of the same key that is failed or has `next_attempt_at > now()`
+    - counters `outbox.published` and `outbox.publish.failures`, which the relay increments
+    - The gauges come from one aggregate query, cached for 5s.
 
 - [ ] **Step 1: Write the failing tests**
   - `InboxProcessorTest`:
@@ -194,7 +203,7 @@ for update skip locked
     - `consumer fail rate 1.0 nacks everything`
     - `trace continues from traceparent attribute`: the handler sees the same traceId.
   - `OutboxPurgeJobTest`: a published row aged 8d is deleted, aged 6d is kept and an unpublished row aged 30d is kept. An inbox row aged 15d is deleted.
-  - `OutboxMetricsTest`: 2 pending rows, the oldest 10s old, so `outbox.pending == 2` and `outbox.lag >= 10`.
+  - `OutboxMetricsTest`: 2 pending rows, the oldest 10s old, so `outbox.pending == 2` and `outbox.lag >= 10`. Then add K1 with a failed head plus 2 later rows, and K2 with a head in backoff plus 1 later row, so `outbox.failed == 1` and `outbox.blocked == 3`.
 - [ ] **Step 2: Run** `./gradlew :outbox-lib:test`. Expected: the new tests FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `./gradlew :outbox-lib:test`. Expected: PASS.
@@ -305,7 +314,7 @@ for update skip locked
   - OTLP endpoints stay on `http://localhost:4318` (the collector sidecar)
 - Modify: service builds, adding `com.google.cloud.sql:postgres-socket-factory` (runtimeOnly, version in the catalog).
 - Create: `infra/terraform/{versions.tf,variables.tf,main.tf,pubsub.tf,sql.tf,run.tf,iam.tf,outputs.tf}`
-  - Variables: `project_id`, `region` (default `europe-west1`), `order_image`, `payment_image`.
+  - Variables: `project_id`, `region` (default `europe-west1`), `order_image`, `payment_image`, `alert_email`.
   - Enable APIs: run, sqladmin, pubsub, artifactregistry, iam.
   - Artifact Registry repo `poc` (docker).
   - Topics, DLQs and subscriptions as in Global Constraints. Grant the Pub/Sub service agent `roles/pubsub.publisher` on the DLQs and `roles/pubsub.subscriber` on the source subscriptions.
@@ -313,6 +322,7 @@ for update skip locked
   - SAs `order-svc` and `payment-svc` with `roles/cloudsql.client`, `roles/cloudsql.instanceUser`, publisher on their own topic and subscriber on their own subscription.
   - Cloud Run v2 services `order-service` and `payment-service`: `min_instance_count=1`, `cpu_idle=false`, env `SPRING_PROFILES_ACTIVE=gcp`, `CLOUD_SQL_INSTANCE` and `DB_IAM_USER`. Ingress all for order and internal for payment. No `allUsers` invoker.
   - Each service gets a sidecar container `us-docker.pkg.dev/cloud-ops-agents-artifacts/google-cloud-opentelemetry-collector/otelcol-google` (pin the latest tag). Its config comes from `infra/otel/collector.yaml`, mounted from a Secret Manager secret: an OTLP receiver on `:4318`, then exporters `googlecloud` (traces) and `googlemanagedprometheus` (metrics). The app container `depends_on` the sidecar.
+  - `monitoring.tf`: `google_monitoring_alert_policy` "Outbox failed events", condition `outbox_failed > 0` for 1 min (PromQL `max(outbox_failed) > 0`), plus an email notification channel `var.alert_email`.
   - The SAs also get `roles/cloudtrace.agent`, `roles/monitoring.metricWriter` and `roles/logging.logWriter`. Enable the cloudtrace, monitoring and secretmanager APIs.
 - Create: `infra/sql/bootstrap.sql`: create schemas `orders` and `payments` authorized to the IAM users (`"order-svc@<project>.iam"`, with `<project>` as a placeholder documented in the README).
 
@@ -339,7 +349,7 @@ The user does part of this task.
 ### Task 11: Docs and publishing
 
 **Files:**
-- Create: `README.md`: Mermaid sequence and component diagrams, local run, the 4 failure demos with exact commands, GCP deploy steps (Tasks 9 and 10), and known limits (no outbox-side DLQ, emulator DLQ gap).
+- Create: `README.md`: Mermaid sequence and component diagrams, local run, the 4 failure demos with exact commands, GCP deploy steps (Tasks 9 and 10), and the poison-event runbook (find rows with `failed_at`, fix the cause, requeue with SQL), known limits (a failed row blocks its key until requeued, emulator DLQ gap).
 - Create: `AGENTS.md` (commands, decisions, conventions, in the style of spring-opentelemetry-poc) and `CLAUDE.md` containing `@AGENTS.md`.
 - Modify: `~/workspace/home-repo/repos/poc.md`, adding a `spring-pubsub-outbox-poc` line. Modify `~/workspace/home-repo/AGENTS.md`, changing the repo count.
 
