@@ -12,7 +12,10 @@ class TestApplication
 /** Base for lib integration tests: schema `orders`, relay scheduler off. */
 @SpringBootTest(
     classes = [TestApplication::class],
-    properties = ["poc.outbox.relay-enabled=false", "spring.liquibase.change-log=classpath:db/changelog/test-changelog.yaml"],
+    properties = [
+        "poc.outbox.relay-enabled=false",
+        "spring.cloud.gcp.pubsub.publisher.enable-message-ordering=true",
+        "spring.liquibase.change-log=classpath:db/changelog/test-changelog.yaml"],
 )
 abstract class LibIntegrationTest {
     companion object {
