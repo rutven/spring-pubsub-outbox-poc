@@ -22,6 +22,11 @@ spring:
         emulator-host: ${PUBSUB_EMULATOR_HOST:localhost:8085}
         publisher:
           enable-message-ordering: true
+          retry:
+            # A publish fails within 25s, before the relay's 30s wait gives up, and shutdown stays bounded.
+            total-timeout-seconds: 25
+            initial-rpc-timeout-seconds: 5
+            max-rpc-timeout-seconds: 10
 
 server:
   port: 8081

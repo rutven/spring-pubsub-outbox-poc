@@ -10,7 +10,7 @@ import org.springframework.context.ApplicationContext
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
 
-@SpringBootTest
+@SpringBootTest(properties = ["poc.outbox.relay-enabled=false"])
 class OrderApplicationTest(@Autowired private val context: ApplicationContext) {
 
     @Test
