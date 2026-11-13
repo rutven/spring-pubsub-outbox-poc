@@ -94,7 +94,7 @@ Relay (`@Scheduled` fixed delay 500 ms, batch 100):
   - `outbox.lag` (gauge, seconds since the oldest unpublished `created_at`)
   - `outbox.published` (counter)
   - `outbox.publish.failures` (counter)
-- On GCP, OTLP export is disabled (open question).
+- On GCP, the apps export OTLP to `localhost:4318`. A Google-built OpenTelemetry Collector sidecar (`otelcol-google`) in each Cloud Run service forwards traces to Cloud Trace and metrics to Cloud Monitoring. Logs go to stdout and Cloud Logging.
 
 ## Failure demos (config flags)
 

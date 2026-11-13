@@ -302,7 +302,7 @@ for update skip locked
   - username from `${DB_IAM_USER}`
   - no emulator host
   - project from the metadata server
-  - OTLP export disabled (`management.otlp.*.export.enabled=false`, `management.tracing.export.enabled=false`)
+  - OTLP endpoints stay on `http://localhost:4318` (the collector sidecar)
 - Modify: service builds, adding `com.google.cloud.sql:postgres-socket-factory` (runtimeOnly, version in the catalog).
 - Create: `infra/terraform/{versions.tf,variables.tf,main.tf,pubsub.tf,sql.tf,run.tf,iam.tf,outputs.tf}`
   - Variables: `project_id`, `region` (default `europe-west1`), `order_image`, `payment_image`.
@@ -312,10 +312,12 @@ for update skip locked
   - Cloud SQL `POSTGRES_18`, tier `db-f1-micro`, flag `cloudsql.iam_authentication=on`, database `poc`, built-in user `postgres` with `random_password` (output, sensitive), and `google_sql_user` type `CLOUD_IAM_SERVICE_ACCOUNT` for both SAs.
   - SAs `order-svc` and `payment-svc` with `roles/cloudsql.client`, `roles/cloudsql.instanceUser`, publisher on their own topic and subscriber on their own subscription.
   - Cloud Run v2 services `order-service` and `payment-service`: `min_instance_count=1`, `cpu_idle=false`, env `SPRING_PROFILES_ACTIVE=gcp`, `CLOUD_SQL_INSTANCE` and `DB_IAM_USER`. Ingress all for order and internal for payment. No `allUsers` invoker.
+  - Each service gets a sidecar container `us-docker.pkg.dev/cloud-ops-agents-artifacts/google-cloud-opentelemetry-collector/otelcol-google` (pin the latest tag). Its config comes from `infra/otel/collector.yaml`, mounted from a Secret Manager secret: an OTLP receiver on `:4318`, then exporters `googlecloud` (traces) and `googlemanagedprometheus` (metrics). The app container `depends_on` the sidecar.
+  - The SAs also get `roles/cloudtrace.agent`, `roles/monitoring.metricWriter` and `roles/logging.logWriter`. Enable the cloudtrace, monitoring and secretmanager APIs.
 - Create: `infra/sql/bootstrap.sql`: create schemas `orders` and `payments` authorized to the IAM users (`"order-svc@<project>.iam"`, with `<project>` as a placeholder documented in the README).
 
 - [ ] **Step 1: Run** `./gradlew build`. Expected: PASS, with the gcp profile not loaded.
-- [ ] **Step 2: Run** `terraform -chdir=infra/terraform init -backend=false && terraform -chdir=infra/terraform validate`. Expected: `Success!`. If terraform is missing, install it via `sdk`/`tfenv`, or ask the user.
+- [ ] **Step 2: Run** `terraform -chdir=infra/terraform init -backend=false && terraform -chdir=infra/terraform validate`. Expected: `Success!`. Terraform 1.17.2 is installed via mise.
 - [ ] **Step 3: Commit** `Add GCP profile and Terraform`.
 
 ---
@@ -329,14 +331,15 @@ The user does part of this task.
 - [ ] **Step 3: Run** a full `terraform apply` with the image vars. The user then runs `infra/sql/bootstrap.sql` in Cloud SQL Studio as `postgres`. Restart both services: `gcloud run services update ... --update-env-vars RESTART=$(date +%s)`.
 - [ ] **Step 4: Smoke test.** `curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" -XPOST <order-url>/orders -d '{"amount":50}'` → PAID, and `{"amount":5000}` → CANCELLED.
 - [ ] **Step 5: DLQ check.** Redeploy payment with `POC_CHAOS_CONSUMER_FAIL_RATE=1.0`, create an order, then `gcloud pubsub subscriptions pull` a temp subscription on `order-events-dlq` shows the message after 5 attempts. Revert the env.
-- [ ] **Step 6: Record results** in the README "GCP" section and commit `Document GCP run`.
+- [ ] **Step 6: Telemetry check.** Find the trace of the PAID order in Cloud Trace (`gcloud` or console). It must span order → Pub/Sub → payment → order. Then check that the `outbox_pending` metric shows up in Cloud Monitoring (Managed Prometheus).
+- [ ] **Step 7: Record results** in the README "GCP" section and commit `Document GCP run`.
 
 ---
 
 ### Task 11: Docs and publishing
 
 **Files:**
-- Create: `README.md`: Mermaid sequence and component diagrams, local run, the 4 failure demos with exact commands, GCP deploy steps (Tasks 9 and 10), and known limits (no outbox-side DLQ, emulator DLQ gap, OTLP off on GCP).
+- Create: `README.md`: Mermaid sequence and component diagrams, local run, the 4 failure demos with exact commands, GCP deploy steps (Tasks 9 and 10), and known limits (no outbox-side DLQ, emulator DLQ gap).
 - Create: `AGENTS.md` (commands, decisions, conventions, in the style of spring-opentelemetry-poc) and `CLAUDE.md` containing `@AGENTS.md`.
 - Modify: `~/workspace/home-repo/repos/poc.md`, adding a `spring-pubsub-outbox-poc` line. Modify `~/workspace/home-repo/AGENTS.md`, changing the repo count.
 
