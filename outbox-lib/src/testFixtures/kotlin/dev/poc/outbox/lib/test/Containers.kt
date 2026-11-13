@@ -56,6 +56,9 @@ object Containers {
         registry.add("spring.datasource.password") { user }
         registry.add("spring.cloud.gcp.project-id") { PROJECT }
         registry.add("spring.cloud.gcp.pubsub.emulator-host") { pubsub.emulatorEndpoint }
+        // No collector in tests: keep tracing in-process, drop OTLP export.
+        registry.add("management.logging.export.enabled") { false }
+        registry.add("management.otlp.metrics.export.enabled") { false }
     }
 
     fun <T> withChannel(block: (FixedTransportChannelProvider) -> T): T {
