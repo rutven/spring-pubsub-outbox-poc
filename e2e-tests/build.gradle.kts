@@ -12,6 +12,7 @@ kotlin {
 dependencies {
     testImplementation(project(":order-service"))
     testImplementation(project(":payment-service"))
+    testImplementation(project(":outbox-lib"))
     testImplementation(testFixtures(project(":outbox-lib")))
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

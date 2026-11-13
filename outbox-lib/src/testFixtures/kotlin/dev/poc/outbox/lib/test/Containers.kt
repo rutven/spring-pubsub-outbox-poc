@@ -50,15 +50,20 @@ object Containers {
 
     fun jdbcUrl(schema: String) = "${postgres.jdbcUrl}&currentSchema=$schema"
 
-    fun register(registry: DynamicPropertyRegistry, schema: String, user: String) {
-        registry.add("spring.datasource.url") { jdbcUrl(schema) }
-        registry.add("spring.datasource.username") { user }
-        registry.add("spring.datasource.password") { user }
-        registry.add("spring.cloud.gcp.project-id") { PROJECT }
-        registry.add("spring.cloud.gcp.pubsub.emulator-host") { pubsub.emulatorEndpoint }
+    /** Datasource and Pub/Sub properties for one service. */
+    fun properties(schema: String, user: String): Map<String, String> = mapOf(
+        "spring.datasource.url" to jdbcUrl(schema),
+        "spring.datasource.username" to user,
+        "spring.datasource.password" to user,
+        "spring.cloud.gcp.project-id" to PROJECT,
+        "spring.cloud.gcp.pubsub.emulator-host" to pubsub.emulatorEndpoint,
         // No collector in tests: keep tracing in-process, drop OTLP export.
-        registry.add("management.logging.export.enabled") { false }
-        registry.add("management.otlp.metrics.export.enabled") { false }
+        "management.logging.export.enabled" to "false",
+        "management.otlp.metrics.export.enabled" to "false",
+    )
+
+    fun register(registry: DynamicPropertyRegistry, schema: String, user: String) {
+        properties(schema, user).forEach { (key, value) -> registry.add(key) { value } }
     }
 
     fun <T> withChannel(block: (FixedTransportChannelProvider) -> T): T {
