@@ -19,6 +19,7 @@ dependencies {
     implementation(project(":outbox-lib"))
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
     implementation("org.springframework.boot:spring-boot-starter-validation")
+    runtimeOnly(libs.cloud.sql.postgres.socket.factory)
 
     testImplementation(testFixtures(project(":outbox-lib")))
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")

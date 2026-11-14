@@ -58,7 +58,8 @@ object Containers {
         "spring.cloud.gcp.project-id" to PROJECT,
         "spring.cloud.gcp.pubsub.emulator-host" to pubsub.emulatorEndpoint,
         // No collector in tests: keep tracing in-process, drop OTLP export.
-        "management.logging.export.enabled" to "false",
+        "management.logging.export.otlp.enabled" to "false",
+        "management.tracing.export.otlp.enabled" to "false",
         "management.otlp.metrics.export.enabled" to "false",
     )
 

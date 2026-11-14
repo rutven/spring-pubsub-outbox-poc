@@ -3,9 +3,12 @@ spring-boot = "4.1.2"
 kotlin = "2.3.21"
 spring-cloud-gcp = "8.3.1"
 jib = "3.5.4"
+cloud-sql-socket-factory = "1.31.0"
 
 [libraries]
 spring-cloud-gcp-bom = { module = "com.google.cloud:spring-cloud-gcp-dependencies", version.ref = "spring-cloud-gcp" }
+
+cloud-sql-postgres-socket-factory = { module = "com.google.cloud.sql:postgres-socket-factory", version.ref = "cloud-sql-socket-factory" }
 
 [plugins]
 spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }
