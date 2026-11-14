@@ -30,6 +30,8 @@ interface OutboxRepository : JpaRepository<OutboxEvent, Long> {
 
     /**
      * Step 2 of the claim, a separate statement so its snapshot sees every commit made before the locks were taken.
+     * Plain FOR UPDATE: the advisory locks already exclude other relays, and skipping a row locked by anyone else
+     * would let the next row of its key go out first.
      */
     @Query(
         nativeQuery = true,
@@ -43,7 +45,7 @@ interface OutboxRepository : JpaRepository<OutboxEvent, Long> {
                                 and (p.failed_at is not null or p.next_attempt_at > now()))
             order by o.id
             limit :limit
-            for update skip locked
+            for update
         """,
     )
     fun claim(keys: Collection<String>, limit: Int): List<OutboxEvent>

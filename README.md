@@ -52,7 +52,7 @@ sequenceDiagram
 - **Messages:** JSON body. Attributes `eventId`, `eventType`, `aggregateId`, `occurredAt`, `traceparent`. The ordering key is the orderId.
 - **Relay** (`OutboxRelay`, every 500 ms, batch 100), all in one transaction:
   1. Lock keys with `pg_try_advisory_xact_lock(hashtext(aggregate_id))`, skipping keys whose earliest unpublished row is failed or backing off.
-  2. In a second statement, so its snapshot sees everything committed before the locks, claim those keys' rows `FOR UPDATE SKIP LOCKED`.
+  2. In a second statement, so its snapshot sees everything committed before the locks, claim those keys' rows `FOR UPDATE`.
   3. Publish, wait for the futures and mark each row published.
   4. A failure moves the row into backoff (`min(2^attempts, 60)` s). The key's later rows are skipped and the key is `resume`d next cycle.
   5. After 10 attempts the row gets `failed_at` and blocks its key until it is requeued (see the runbook).
@@ -137,18 +137,22 @@ project_id  = "<project>"
 alert_email = "<you@example.com>"
 EOT
 terraform init
+# 1. APIs + registry, then push images
 terraform apply -target=google_project_service.apis -target=google_artifact_registry_repository.poc
 gcloud auth configure-docker europe-west1-docker.pkg.dev
 (cd ../.. && IMAGE_REPO=$(terraform -chdir=infra/terraform output -raw image_repo) ./gradlew jib)
+# 2. Cloud SQL, database and IAM users (pulls in the service accounts)
+terraform apply -target=google_sql_database.poc -target=google_sql_user.postgres -target=google_sql_user.svc
+```
+
+3. Before the services exist, create their schemas: open Cloud SQL Studio for `poc-pg`, database `poc`, sign in as `postgres` (`terraform output -raw postgres_password`), and run `infra/sql/bootstrap.sql` with `<project>` replaced. Otherwise Liquibase fails on start and the Cloud Run revisions never become ready.
+4. Apply everything:
+
+```bash
 terraform apply \
   -var order_image=$(terraform output -raw image_repo)/order-service \
   -var payment_image=$(terraform output -raw image_repo)/payment-service
 ```
-
-Then, once:
-1. Open Cloud SQL Studio for `poc-pg`, database `poc`. Sign in as `postgres` (`terraform output -raw postgres_password`).
-2. Run `infra/sql/bootstrap.sql` with `<project>` replaced. This creates the schemas owned by the IAM users.
-3. Restart both services: `gcloud run services update order-service --region europe-west1 --update-env-vars RESTART=$(date +%s)` (same for payment-service).
 
 Smoke test:
 

@@ -5,6 +5,9 @@ import io.micrometer.observation.ObservationRegistry
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.springframework.beans.factory.annotation.Autowired
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import javax.sql.DataSource
 import java.time.Duration
 import java.time.Instant
 import java.time.OffsetDateTime
@@ -15,6 +18,7 @@ import kotlin.test.assertTrue
 
 class OutboxRelayTest : RelayTestSupport() {
     @Autowired lateinit var observations: ObservationRegistry
+    @Autowired lateinit var dataSource: DataSource
 
     private fun instant(value: Any?) = (value as java.sql.Timestamp).toInstant()
 
@@ -143,5 +147,24 @@ class OutboxRelayTest : RelayTestSupport() {
         relay.relayOnce()
 
         assertEquals(listOf(a, b), publisher.eventIds().filter { it == a || it == b })
+    }
+
+    @Test
+    fun `head row locked by another transaction is not jumped`() {
+        val a = append("K1")
+        val b = append("K1")
+        dataSource.connection.use { locker ->
+            locker.autoCommit = false
+            locker.prepareStatement("select 1 from outbox where event_id = '$a'::uuid for update").executeQuery().close()
+
+            val run = Executors.newSingleThreadExecutor().submit<RelayResult> { relay.relayOnce() }
+            Thread.sleep(1000)
+            assertTrue(b !in publisher.eventIds(), "b jumped its locked head: ${publisher.eventIds()}")
+
+            locker.rollback()
+            run.get(10, TimeUnit.SECONDS)
+        }
+
+        assertEquals(listOf(a, b), publisher.eventIds())
     }
 }

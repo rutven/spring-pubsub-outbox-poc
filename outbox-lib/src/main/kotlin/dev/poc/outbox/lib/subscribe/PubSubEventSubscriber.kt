@@ -19,6 +19,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.random.Random
 
 /** Subscribes every [EventHandler] once the app is ready. Acks after the inbox transaction commits. */
@@ -63,16 +64,23 @@ class PubSubEventSubscriber(
             scheduleResubscribe(handler)
             return
         }
+        val restartOnce = AtomicBoolean() // listener and the state check below may both see the failure
         subscriber.addListener(
             object : ApiService.Listener() {
                 override fun failed(from: ApiService.State, failure: Throwable) {
                     log.error("Subscriber for {} failed, resubscribing in {}", handler.subscription, RESUBSCRIBE_DELAY, failure)
-                    scheduleResubscribe(handler)
+                    if (restartOnce.compareAndSet(false, true)) scheduleResubscribe(handler)
                 }
             },
             MoreExecutors.directExecutor(),
         )
         subscribers[handler.subscription] = subscriber
+        // The subscriber starts inside subscribe(); a failure before addListener is not replayed to the listener.
+        if (subscriber.state() == ApiService.State.FAILED) {
+            log.error("Subscriber for {} failed on start, resubscribing in {}", handler.subscription, RESUBSCRIBE_DELAY, subscriber.failureCause())
+            if (restartOnce.compareAndSet(false, true)) scheduleResubscribe(handler)
+            return
+        }
         log.info("Subscribed {} to {}", handler.javaClass.simpleName, handler.subscription)
     }
 

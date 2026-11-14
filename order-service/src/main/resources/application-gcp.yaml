@@ -4,6 +4,8 @@ spring:
     url: jdbc:postgresql:///poc?cloudSqlInstance=${CLOUD_SQL_INSTANCE}&socketFactory=com.google.cloud.sql.postgres.SocketFactory&enableIamAuth=true&sslmode=disable&currentSchema=orders
     username: ${DB_IAM_USER}
     password: ""
+    hikari:
+      maximum-pool-size: 4 # db-f1-micro allows ~25 connections; 2 services x 2 instances x overlap during rollouts
   cloud:
     gcp:
       pubsub:

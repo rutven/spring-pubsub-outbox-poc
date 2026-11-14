@@ -55,6 +55,8 @@ class TwoServices private constructor(
     private val orderJdbc = orderContexts.first().getBean(JdbcTemplate::class.java)
     private val paymentJdbc = paymentContext.getBean(JdbcTemplate::class.java)
 
+    fun <T : Any> paymentBean(type: KClass<T>): T = paymentContext.getBean(type.java)
+
     fun paymentRows(orderId: UUID): Int =
         paymentJdbc.queryForObject("select count(*) from payments where order_id = ?", Int::class.java, orderId)!!
 
