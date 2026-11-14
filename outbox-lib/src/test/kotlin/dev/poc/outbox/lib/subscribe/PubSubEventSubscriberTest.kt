@@ -4,6 +4,7 @@ import com.google.cloud.spring.pubsub.core.PubSubTemplate
 import com.google.protobuf.ByteString
 import com.google.pubsub.v1.PubsubMessage
 import dev.poc.outbox.lib.LibIntegrationTest
+import dev.poc.outbox.lib.test.Containers
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.tracing.Tracer
 import org.awaitility.kotlin.atMost
@@ -125,5 +126,16 @@ class PubSubEventSubscriberTest : LibIntegrationTest() {
 
         await atMost Duration.ofSeconds(15) untilAsserted { assertEquals(1, handler.callsFor(id)) }
         assertEquals(traceId, handler.traceIds[handler.calls.indexOfFirst { it.eventId == id }])
+    }
+
+    @Test
+    fun `subscriber resubscribes after its subscription disappears`() {
+        Containers.deleteSubscription(handler.subscription)
+        Thread.sleep(Duration.ofSeconds(3)) // streaming pull notices NOT_FOUND and the subscriber fails
+        Containers.ensureTopology()
+
+        val id = send("Known")
+
+        await atMost Duration.ofSeconds(45) untilAsserted { assertEquals(1, handler.callsFor(id)) }
     }
 }

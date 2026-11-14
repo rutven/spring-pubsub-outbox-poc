@@ -5,6 +5,7 @@ plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.kotlin.spring)
     alias(libs.plugins.kotlin.jpa)
+    alias(libs.plugins.jib)
 }
 
 kotlin {
@@ -22,4 +23,10 @@ dependencies {
     testImplementation(testFixtures(project(":outbox-lib")))
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+jib {
+    from.image = "eclipse-temurin:25-jre"
+    to.image = "${System.getenv("IMAGE_REPO") ?: "local"}/order-service"
+    container.ports = listOf("8081")
 }

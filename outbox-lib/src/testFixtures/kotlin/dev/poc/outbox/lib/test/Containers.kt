@@ -75,6 +75,16 @@ object Containers {
         }
     }
 
+    /** Re-creates missing topics and subscriptions, as after an emulator restart. */
+    fun ensureTopology() = createTopology(pubsub.emulatorEndpoint)
+
+    fun deleteSubscription(name: String) = withChannel { transport ->
+        SubscriptionAdminClient.create(
+            SubscriptionAdminSettings.newBuilder().setTransportChannelProvider(transport)
+                .setCredentialsProvider(NoCredentialsProvider.create()).build(),
+        ).use { it.deleteSubscription(SubscriptionName.of(PROJECT, name)) }
+    }
+
     private fun createTopology(endpoint: String) {
         val channel = ManagedChannelBuilder.forTarget(endpoint).usePlaintext().build()
         val transport = FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel))
