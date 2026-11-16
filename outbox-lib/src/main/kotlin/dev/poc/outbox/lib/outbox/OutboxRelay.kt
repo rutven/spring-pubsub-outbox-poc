@@ -43,16 +43,23 @@ class OutboxRelay(
         if (keys.isEmpty()) return RelayResult(0, 0, 0)
         val rows = repository.claim(keys, properties.batchSize)
 
-        val sent = rows.map { it to publish(it) }
+        // A publish that fails at once never reaches the client, so the client does not pause its key:
+        // later rows of that aggregate must not be sent at all.
+        val failedFast = mutableSetOf<String>()
+        val sent = rows.map { row ->
+            val future = if (row.aggregateId in failedFast) null else publish(row)
+            if (future?.isCompletedExceptionally == true) failedFast += row.aggregateId
+            row to future
+        }
         var published = 0
         var failed = 0
         var skipped = 0
-        val failedKeys = mutableSetOf<Pair<String, String>>()
+        // Keyed by aggregate like the claim SQL, so a failure blocks the aggregate's rows on every topic.
+        val failedAggregates = mutableSetOf<String>()
         val now = Instant.now()
         for ((row, future) in sent) {
-            val key = row.topic to row.aggregateId
-            if (key in failedKeys) {
-                skipped++ // the client paused this key after the earlier failure
+            if (row.aggregateId in failedAggregates || future == null) {
+                skipped++ // the client paused this key after the earlier failure, or the row was never sent
                 continue
             }
             val error = await(future)
@@ -61,11 +68,11 @@ class OutboxRelay(
                 published++
             } else {
                 markFailed(row, error, now)
-                failedKeys += key
+                failedAggregates += row.aggregateId
+                toResume += row.topic to row.aggregateId
                 failed++
             }
         }
-        toResume += failedKeys
 
         if (crashAfterPublish) crashAction.crash()
         return RelayResult(published, failed, skipped)

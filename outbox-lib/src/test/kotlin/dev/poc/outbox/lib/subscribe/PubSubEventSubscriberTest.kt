@@ -105,17 +105,32 @@ class PubSubEventSubscriberTest : LibIntegrationTest() {
     }
 
     @Test
-    fun `consumer fail rate 1 nacks everything`() {
+    fun `consumer fail rate 1 rolls back and nacks everything`() {
         val chaosBefore = outcome("chaos")
+        val processedBefore = outcome("processed")
         subscriber.consumerFailRate = 1.0
         try {
             val id = send("Known")
 
             await atMost Duration.ofSeconds(40) untilAsserted { assertTrue(outcome("chaos") >= chaosBefore + 2) }
-            assertEquals(0, handler.callsFor(id))
+            assertTrue(handler.callsFor(id) >= 2)
         } finally {
             subscriber.consumerFailRate = 0.0
         }
+        // The inbox row was rolled back, so the redelivery is processed, not skipped as a duplicate.
+        await atMost Duration.ofSeconds(40) untilAsserted { assertEquals(processedBefore + 1, outcome("processed")) }
+    }
+
+    @Test
+    fun `message without eventId is nacked`() {
+        val malformedBefore = outcome("malformed")
+        val message = PubsubMessage.newBuilder()
+            .setData(ByteString.copyFromUtf8("{}"))
+            .putAllAttributes(mapOf("eventType" to "Known"))
+            .build()
+        pubSub.publish("payment-events", message).get(10, TimeUnit.SECONDS)
+
+        await atMost Duration.ofSeconds(40) untilAsserted { assertTrue(outcome("malformed") >= malformedBefore + 2) }
     }
 
     @Test

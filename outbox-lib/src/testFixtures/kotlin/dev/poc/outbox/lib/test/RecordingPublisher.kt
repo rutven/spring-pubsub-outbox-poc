@@ -18,6 +18,9 @@ class RecordingPublisher : MessagePublisher {
     val messages = CopyOnWriteArrayList<OutboundMessage>()
     val resumed = CopyOnWriteArrayList<Pair<String, String>>()
     val failOn: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Event ids whose publish throws before reaching the client, so the key is not paused. */
+    val throwOn: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val paused: MutableSet<Pair<String, String>> = ConcurrentHashMap.newKeySet()
 
     @Volatile
@@ -26,6 +29,7 @@ class RecordingPublisher : MessagePublisher {
     override fun publish(message: OutboundMessage): CompletableFuture<String> {
         val eventId = message.attributes.getValue("eventId")
         val key = message.topic to message.orderingKey
+        if (eventId in throwOn) throw IllegalArgumentException("rejected $eventId")
         if (key in paused) return CompletableFuture.failedFuture(IllegalStateException("ordering key paused"))
         if (eventId in failOn) {
             paused += key
@@ -49,6 +53,7 @@ class RecordingPublisher : MessagePublisher {
         messages.clear()
         resumed.clear()
         failOn.clear()
+        throwOn.clear()
         paused.clear()
         delay = Duration.ZERO
     }

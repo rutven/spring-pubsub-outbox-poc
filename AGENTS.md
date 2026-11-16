@@ -12,7 +12,7 @@ Learning PoC: transactional outbox and idempotent inbox over GCP Pub/Sub with Sp
 ## Decisions (keep them unless the user says otherwise)
 
 - Pub/Sub sits behind `MessagePublisher` and the `EventHandler`/`PubSubEventSubscriber` pair, so relay tests use `RecordingPublisher` (testFixtures). It mimics the client: a failed publish pauses its ordering key until `resume`.
-- The relay claims in two statements: first advisory-lock the unblocked keys, then select rows. The second statement's snapshot must postdate the locks; one statement can let a later row jump a head row that just went into backoff. `OutboxRelayConcurrencyTest` guards this.
+- The relay claims in two statements: first advisory-lock the unblocked keys, then select rows. The second statement's snapshot must postdate the locks; one statement can let a later row jump a head row that just went into backoff. `OutboxRelayConcurrencyTest` guards this. The row select uses plain `FOR UPDATE`, not `SKIP LOCKED`: the advisory locks already split keys, and skipping a locked head row would let a later row of its key go first.
 - A row that exhausts `maxAttempts` gets `failed_at` and blocks its key until a manual requeue. Never auto-skip it: that breaks ordering.
 - The inbox insert, the handler and its outbox writes share one transaction. Ack only after commit.
 - Blocking code on virtual threads, no coroutines.

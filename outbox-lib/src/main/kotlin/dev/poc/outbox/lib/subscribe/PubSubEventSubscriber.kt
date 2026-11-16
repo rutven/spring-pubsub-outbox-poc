@@ -38,7 +38,7 @@ class PubSubEventSubscriber(
     @Volatile
     private var stopping = false
 
-    /** Chaos: share of messages nacked before processing (`poc.chaos.consumer-fail-rate`). */
+    /** Chaos: share of messages whose handler throws after running, inside the inbox transaction (`poc.chaos.consumer-fail-rate`). */
     @Volatile
     var consumerFailRate: Double = consumerFailRate
 
@@ -94,16 +94,19 @@ class PubSubEventSubscriber(
         val eventType = attributes["eventType"]
         val eventId = attributes["eventId"]?.let { runCatching { UUID.fromString(it) }.getOrNull() }
         when {
-            Random.nextDouble() < consumerFailRate -> {
-                log.warn("Chaos: nacking eventId={}", eventId)
-                finish(handler, message, "chaos", ack = false)
+            eventType == null || eventId == null -> {
+                log.warn("Malformed message eventType={} eventId={} on {}, nacking", eventType, attributes["eventId"], handler.subscription)
+                finish(handler, message, "malformed", ack = false)
             }
-            eventType == null || eventId == null || !handler.handles(eventType) -> {
-                log.info("Ignoring message eventType={} eventId={} on {}", eventType, attributes["eventId"], handler.subscription)
+            !handler.handles(eventType) -> {
+                log.info("Ignoring message eventType={} eventId={} on {}", eventType, eventId, handler.subscription)
                 finish(handler, message, "ignored", ack = true)
             }
-            else -> process(handler, message, InboundEvent(eventId, eventType, attributes["aggregateId"].orEmpty(),
-                message.pubsubMessage.data.toStringUtf8(), attributes))
+            else -> {
+                val event = InboundEvent(eventId, eventType, attributes["aggregateId"].orEmpty(),
+                    message.pubsubMessage.data.toStringUtf8(), attributes)
+                process(if (Random.nextDouble() < consumerFailRate) ChaosHandler(handler) else handler, message, event)
+            }
         }
     }
 
@@ -117,6 +120,9 @@ class PubSubEventSubscriber(
                 .observeChecked<Boolean, Exception> { inboxProcessor.process(event, handler) }!!
             if (!processed) log.info("Duplicate eventId={} on {}, skipped", event.eventId, handler.subscription)
             finish(handler, message, if (processed) "processed" else "duplicate", ack = true)
+        } catch (e: ChaosException) {
+            log.warn("Chaos: eventId={} rolled back, nacking", event.eventId)
+            finish(handler, message, "chaos", ack = false)
         } catch (e: Exception) {
             log.warn("Handling eventId={} type={} failed, nacking", event.eventId, event.eventType, e)
             finish(handler, message, "failed", ack = false)
@@ -130,5 +136,15 @@ class PubSubEventSubscriber(
 
     private companion object {
         val RESUBSCRIBE_DELAY: Duration = Duration.ofSeconds(5)
+    }
+}
+
+private class ChaosException : RuntimeException("chaos")
+
+/** Runs the handler, then throws, so the inbox, business and outbox writes all roll back. */
+private class ChaosHandler(private val delegate: EventHandler) : EventHandler by delegate {
+    override fun handle(event: InboundEvent) {
+        delegate.handle(event)
+        throw ChaosException()
     }
 }

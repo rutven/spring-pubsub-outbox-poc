@@ -95,7 +95,7 @@ On a fresh database, the two order replicas race to create Liquibase's tables. O
 | Demo | How | What to watch |
 |---|---|---|
 | Crash after publish, before commit | `POC_CHAOS_CRASH_AFTER_PUBLISH=true docker compose --profile apps up -d order-service`, create an order, watch the container exit, then `docker compose --profile apps up -d order-service` (flag off; with it on, every restart crashes again) | The JVM halted after publishing, so the row was not marked. On restart it is published again and the payment inbox logs `Duplicate eventId … skipped`. Exactly one payment. |
-| Flaky consumer | `POC_CHAOS_CONSUMER_FAIL_RATE=0.5 docker compose --profile apps up -d payment-service`, then create orders | `inbox_messages_total{outcome="chaos"}` grows. Every order still ends PAID. |
+| Flaky consumer | `POC_CHAOS_CONSUMER_FAIL_RATE=0.5 docker compose --profile apps up -d payment-service`, then create orders | `inbox_messages_total{outcome="chaos"}` grows: the handler ran, then its inbox, business and outbox writes rolled back. Every order still ends PAID. |
 | Pub/Sub outage | `docker compose stop pubsub`, then create an order. Check `select attempts, last_error from orders.outbox`. Then `docker compose start pubsub && docker compose run --rm pubsub-init` (the emulator is in-memory) | Attempts and backoff grow while it is down. The order becomes PAID after the restart. |
 | Multiple relays | `--scale order-service=2` (above), then create many orders | Each event is published once and in order per key, thanks to the advisory locks. |
 

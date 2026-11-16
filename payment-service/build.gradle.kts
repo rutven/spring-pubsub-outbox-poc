@@ -1,5 +1,3 @@
-import org.springframework.boot.gradle.plugin.SpringBootPlugin
-
 plugins {
     alias(libs.plugins.spring.boot)
     alias(libs.plugins.kotlin.jvm)

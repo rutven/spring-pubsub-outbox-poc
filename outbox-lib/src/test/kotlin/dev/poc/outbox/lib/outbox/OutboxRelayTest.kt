@@ -65,6 +65,19 @@ class OutboxRelayTest : RelayTestSupport() {
     }
 
     @Test
+    fun `publish that throws at once does not send later rows of its key`() {
+        val a = append("K1")
+        val b = append("K1")
+        publisher.throwOn += a
+
+        val result = relay.relayOnce()
+
+        assertEquals(RelayResult(0, 1, 1), result)
+        assertEquals(emptyList(), publisher.eventIds())
+        assertNull(row(b)["published_at"])
+    }
+
+    @Test
     fun `row behind a backing-off head is not claimed`() {
         val a = append("K1")
         append("K1")
