@@ -1,0 +1,73 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: poc
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "poc"]
+      interval: 2s
+      retries: 30
+
+  pubsub:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: gcloud beta emulators pubsub start --host-port=0.0.0.0:8085 --project=poc-local
+    ports:
+      - "127.0.0.1:8085:8085"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8085"]
+      interval: 2s
+      retries: 30
+
+  pubsub-init:
+    image: curlimages/curl:8.17.0
+    depends_on:
+      pubsub:
+        condition: service_healthy
+    environment:
+      PUBSUB_HOST: pubsub:8085
+    volumes:
+      - ./docker/pubsub/init.sh:/init.sh:ro
+    entrypoint: ["sh", "/init.sh"]
+
+  lgtm:
+    # OTel Collector + Tempo + Loki + Prometheus + Grafana (admin/admin)
+    image: grafana/otel-lgtm:latest
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+
+  # docker compose --profile apps up -d [--scale order-service=2]; build images first: ./gradlew jibDockerBuild
+  order-service:
+    image: local/order-service
+    profiles: [apps]
+    restart: unless-stopped # brings the app back after the crash-after-publish demo halts it
+    depends_on: &app-deps
+      postgres:
+        condition: service_healthy
+      pubsub-init:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: postgres
+      PUBSUB_EMULATOR_HOST: pubsub:8085
+      OTLP_ENDPOINT: http://lgtm:4318
+      POC_CHAOS_CRASH_AFTER_PUBLISH: ${POC_CHAOS_CRASH_AFTER_PUBLISH:-false}
+    ports:
+      - "127.0.0.1:8081-8083:8081"
+
+  payment-service:
+    image: local/payment-service
+    profiles: [apps]
+    restart: unless-stopped
+    depends_on: *app-deps
+    environment:
+      DB_HOST: postgres
+      PUBSUB_EMULATOR_HOST: pubsub:8085
+      OTLP_ENDPOINT: http://lgtm:4318
+      POC_CHAOS_CONSUMER_FAIL_RATE: ${POC_CHAOS_CONSUMER_FAIL_RATE:-0.0}

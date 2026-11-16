@@ -1,0 +1,17 @@
+databaseChangeLog:
+  - include:
+      file: db/changelog/outbox/outbox-changelog.yaml
+  - changeSet:
+      id: orders-1
+      author: poc
+      changes:
+        - sql:
+            sql: |
+              create table orders (
+                  id            uuid primary key,
+                  amount        numeric(12, 2) not null,
+                  status        text           not null,
+                  cancel_reason text,
+                  created_at    timestamptz    not null,
+                  version       bigint         not null
+              );
